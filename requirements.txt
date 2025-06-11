@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+sqlalchemy
+face_recognition
+python-jose
+bcrypt
+pillow
+numpy
