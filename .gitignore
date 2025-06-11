@@ -1,0 +1,15 @@
+# Ignore python cache
+__pycache__/
+*.pyc
+
+# Ignore virtual environment
+venv/
+
+# Ignore debug/test image (optional)
+debug_no_face_verify.jpg
+
+# Ignore database (optional)
+faces.db
+
+# VSCode settings (optional)
+.vscode/
