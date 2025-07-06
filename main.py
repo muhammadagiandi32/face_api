@@ -16,7 +16,7 @@ import bcrypt
 from fastapi import Body
 from sqlalchemy import and_
 
-DATABASE_URL = "mysql+mysqlconnector://root:@localhost:3306/face_db"
+DATABASE_URL = "mysql+mysqlconnector://admin_user:password_kamu@115.124.68.196:3306/kehadiran"
 Base = declarative_base()
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine)
@@ -329,43 +329,53 @@ from datetime import datetime
 
 @app.get("/absen/history")
 def get_absen_history(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    rows = (
-        db.query(Absen)
-        .filter(Absen.id == user.id)
-        .order_by(Absen.date.desc(), Absen.time.desc())
-        .all()
-    )
+    import time
+    t0 = time.time()
+    try:
+        rows = (
+            db.query(Absen)
+            .filter(Absen.id == user.id)
+            .order_by(Absen.date.desc(), Absen.time.desc())
+            .all()
+        )
 
-    # Group by tanggal
-    history = {}
-    for ab in rows:
-        # Format tanggal: Senin, 17 Mei 2025
-        date_str = ab.date.strftime("%A, %d %B %Y")
-        jam = ab.time
-        jenis = ab.aut.lower()
-        lokasi = ab.lokasi
+        # Group by tanggal
+        history = {}
+        for ab in rows:
+            date_str = ab.date.strftime("%A, %d %B %Y")
+            jam = ab.time
+            jenis = ab.aut.lower()
+            lokasi = ab.lokasi
 
-        if date_str not in history:
-            history[date_str] = {"masuk": None, "keluar": None, "lokasi": lokasi}
+            if date_str not in history:
+                history[date_str] = {"masuk": None, "keluar": None, "lokasi": lokasi}
 
-        # Masukkan jam masuk/keluar
-        if "masuk" in jenis and not history[date_str]["masuk"]:
-            history[date_str]["masuk"] = jam
-            history[date_str]["lokasi"] = lokasi
-        if "keluar" in jenis:
-            history[date_str]["keluar"] = jam
+            if "masuk" in jenis and not history[date_str]["masuk"]:
+                history[date_str]["masuk"] = jam
+                history[date_str]["lokasi"] = lokasi
+            if "keluar" in jenis:
+                history[date_str]["keluar"] = jam
 
-    # Convert dict ke list, urut terbaru
-    result = []
-    for date_str, val in history.items():
-        result.append({
-            "tanggal": date_str,
-            "masuk": val["masuk"],
-            "keluar": val["keluar"],
-            "lokasi": val["lokasi"],
-        })
+        result = []
+        for date_str, val in history.items():
+            result.append({
+                "tanggal": date_str,
+                "masuk": val["masuk"],
+                "keluar": val["keluar"],
+                "lokasi": val["lokasi"],
+            })
 
-    # Urutkan result descending tanggal (jika perlu)
-    result = sorted(result, key=lambda x: datetime.strptime(x["tanggal"], "%A, %d %B %Y"), reverse=True)
+        result = sorted(result, key=lambda x: datetime.strptime(x["tanggal"], "%A, %d %B %Y"), reverse=True)
 
-    return {"history": result}
+        t1 = time.time()
+        print(f"[DEBUG] History endpoint selesai dalam {t1-t0:.2f} detik")
+        return {"history": result}
+
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print("[ERROR] /absen/history:", str(e))
+        print(tb)
+        # Kamu bisa return pesan error ke frontend juga
+        raise HTTPException(status_code=500, detail=f"Internal Server Error: {e}")
+
