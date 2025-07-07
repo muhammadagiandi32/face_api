@@ -15,8 +15,9 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import bcrypt
 from fastapi import Body
 from sqlalchemy import and_
+from sqlalchemy.dialects.mysql import LONGTEXT
 
-DATABASE_URL = "mysql+mysqlconnector://admin_user:password_kamu@115.124.68.196:3306/kehadiran"
+DATABASE_URL = "mysql+mysqlconnector://wadmin:VWVBP04-HJFq@116.193.191.198:3306/kehadiran"
 Base = declarative_base()
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine)
@@ -31,7 +32,7 @@ class User(Base):
     nama = Column(String(100), nullable=False)
     email = Column(String(100), nullable=False, unique=True)
     password = Column(String(255), nullable=False)
-    foto_registrasi = Column(Text)
+    foto_registrasi = Column(LONGTEXT)
     encoding = Column(BLOB)
 
 class Absen(Base):
@@ -42,10 +43,10 @@ class Absen(Base):
     date = Column(Date, nullable=False)
     time = Column(String(10), nullable=False)
     aut = Column(String(50), nullable=False)
-    foto = Column(Text, nullable=False)
+    foto = Column(LONGTEXT, nullable=False)
     latitude = Column(String(50))
     longitude = Column(String(50))
-    lokasi = Column(Text)
+    lokasi = Column(LONGTEXT)
     encoding = Column(BLOB)
 
 Base.metadata.create_all(bind=engine)
