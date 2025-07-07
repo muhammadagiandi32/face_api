@@ -5,4 +5,4 @@ face_recognition
 python-jose
 bcrypt
 pillow
-numpy
+numpy==1.21.6
