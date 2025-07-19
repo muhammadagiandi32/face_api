@@ -101,7 +101,7 @@ async def verify_face(
         db.add(User(nip=nip, encoding=pickle.dumps([target])))
         db.commit()
         return JSONResponse(
-            status_code=201,
+            status_code=200,
             content={
                 "status": "success",
                 "message": "User baru didaftarkan dan absensi direkam.",
