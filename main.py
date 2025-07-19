@@ -29,7 +29,7 @@ app = FastAPI(title="Face Verification Service With DB")
 THRESHOLD: float = 0.38  # face distance threshold
 
 # DATABASE SETUP
-DATABASE_URL = "mysql+mysqlconnector://wadmin:VWVBP04-HJFq@116.193.191.198:3306/kehadiran"
+DATABASE_URL = "mysql+mysqlconnector://admin_user:password_kamu@115.124.68.196:3306/absensi_db"
 Base = declarative_base()
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine)
