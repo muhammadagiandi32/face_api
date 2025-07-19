@@ -101,15 +101,15 @@ async def verify_face(
         db.add(User(nip=nip, encoding=pickle.dumps([target])))
         db.commit()
         return JSONResponse(
-            status_code=200,
+            status_code=201,
             content={
                 "status": "success",
                 "message": "User baru didaftarkan dan absensi direkam.",
                 "data": {
                     "nip": nip,
                     "matched": True,
-                    "result": "registered"
-                }
+                    "result": "registered",
+                },
             }
         )
 
@@ -118,21 +118,34 @@ async def verify_face(
     known_enc = known_list[0] if isinstance(known_list, list) else known_list
     dist = float(face_recognition.face_distance([known_enc], target)[0])
     matched = bool(dist < THRESHOLD)
-
-    return JSONResponse(
-            status_code=401,
+    if matched:return JSONResponse(
+            status_code=200,
             content={
-                "status": "failed",
-                "message": "Wajah tidak cocok dengan data yang terdaftar.",
+                "status": "success",
+                "message": "Wajah cocok dengan data yang terdaftar.",
                 "data": {
                     "nip": nip,
-                    "matched": False,
+                    "matched": matched,
                     "distance": dist,
                     "threshold": THRESHOLD,
-                    "result": "not matched",
-                },
-            },
+                    "result": "matched"
+                }
+            }
         )
+    else:return JSONResponse(
+        status_code=401,
+        content={
+            "status": "failed",
+            "message": "Wajah tidak cocok dengan data yang terdaftar.",
+            "data": {
+                "nip": nip,
+                "matched": matched,
+                "distance": dist,
+                "threshold": THRESHOLD,
+                "result": "not matched"
+            }
+        }
+    )
 
 
 @app.get("/")
