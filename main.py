@@ -24,6 +24,7 @@ from PIL import Image, ExifTags
 from sqlalchemy import create_engine, Column, String, BLOB
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
+from fastapi.responses import JSONResponse
 
 app = FastAPI(title="Face Verification Service With DB")
 THRESHOLD: float = 0.38  # face distance threshold
@@ -99,11 +100,18 @@ async def verify_face(
         # → Simpan user baru jika belum ada
         db.add(User(nip=nip, encoding=pickle.dumps([target])))
         db.commit()
-        return {
-            "result": "new user registered and attendance recorded",
-            "matched": True,
-            "nip": nip
-        }
+        return JSONResponse(
+            status_code=201,
+            content={
+                "status": "success",
+                "message": "User baru didaftarkan dan absensi direkam.",
+                "data": {
+                    "nip": nip,
+                    "matched": True,
+                    "result": "registered"
+                }
+            }
+        )
 
     # 3. Bandingkan wajah jika NIP sudah terdaftar
     known_list = pickle.loads(user.encoding)
@@ -111,13 +119,20 @@ async def verify_face(
     dist = float(face_recognition.face_distance([known_enc], target)[0])
     matched = bool(dist < THRESHOLD)
 
-    return {
-        "result": "matched" if matched else "not matched",
-        "matched": matched,
-        "distance": dist,
-        "threshold": THRESHOLD,
-        "nip": nip
-    }
+    return JSONResponse(
+            status_code=401,
+            content={
+                "status": "failed",
+                "message": "Wajah tidak cocok dengan data yang terdaftar.",
+                "data": {
+                    "nip": nip,
+                    "matched": matched,
+                    "distance": dist,
+                    "threshold": THRESHOLD,
+                    "result": "not matched",
+                },
+            },
+        )
 
 
 @app.get("/")
