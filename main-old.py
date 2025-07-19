@@ -10,8 +10,8 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 import face_recognition
 from datetime import datetime, timedelta
-# from jose import JWTError, jwt
-# from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from jose import JWTError, jwt
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import bcrypt
 from fastapi import Body
 from sqlalchemy import and_
@@ -84,12 +84,12 @@ def get_encodings(image: Image.Image) -> list:
     rgb = np.array(image.convert("RGB"))
     return face_recognition.face_encodings(rgb)
 
-# def create_access_token(data: dict, expires_delta: timedelta = None):
-#     to_encode = data.copy()
-#     expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
-#     to_encode.update({"exp": expire})
-#     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-#     return encoded_jwt
+def create_access_token(data: dict, expires_delta: timedelta = None):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
 
 def verify_password(plain, hashed):
     try:
@@ -98,14 +98,14 @@ def verify_password(plain, hashed):
         return False
 
 
-# bearer_scheme = HTTPBearer()
+bearer_scheme = HTTPBearer()
 
-# def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme), db: Session = Depends(get_db)):
-#     try:
-#         payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
-#         email = payload.get("email")
-#         if email is None:
-#             raise HTTPException(401, "Token tidak valid!")
+def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme), db: Session = Depends(get_db)):
+    try:
+        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+        email = payload.get("email")
+        if email is None:
+            raise HTTPException(401, "Token tidak valid!")
         user = db.query(User).filter_by(email=email).first()
         if not user:
             raise HTTPException(401, "User tidak ditemukan!")
@@ -209,17 +209,17 @@ async def register_scan(
         print("[DEBUG][DB ERROR]:", str(e))
         raise HTTPException(500, f"DB Error: {e}")
 
-# @app.post("/refresh/")
-# async def refresh_token(email: str = Body(...), db: Session = Depends(get_db)):
-#     user = db.query(User).filter_by(email=email).first()
-#     if not user:
-#         raise HTTPException(404, "User tidak ditemukan!")
-#     # Buat token baru, payload bebas (email, nama, dsb)
-#     new_token = create_access_token({"email": user.email, "name": user.nama})
-#     return {
-#         "access_token": new_token,
-#         "token_type": "bearer"
-#     }
+@app.post("/refresh/")
+async def refresh_token(email: str = Body(...), db: Session = Depends(get_db)):
+    user = db.query(User).filter_by(email=email).first()
+    if not user:
+        raise HTTPException(404, "User tidak ditemukan!")
+    # Buat token baru, payload bebas (email, nama, dsb)
+    new_token = create_access_token({"email": user.email, "name": user.nama})
+    return {
+        "access_token": new_token,
+        "token_type": "bearer"
+    }
 
 @app.post("/absen/")
 async def absen(
@@ -228,7 +228,7 @@ async def absen(
     latitude: str = Form(None),
     longitude: str = Form(None),
     lokasi: str = Form(None),
-    nama: str = Form(...),
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     try:
@@ -329,7 +329,7 @@ from sqlalchemy.orm import Session
 from datetime import datetime
 
 @app.get("/absen/history")
-def get_absen_history(nama: str = Form(...), db: Session = Depends(get_db)):
+def get_absen_history(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     import time
     t0 = time.time()
     try:
