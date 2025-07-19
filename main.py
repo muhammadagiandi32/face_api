@@ -12,34 +12,37 @@ Business Rule (Final)
   - Response: "matched" atau "not matched" (dalam JSON).
 """
 
+
 import io
 import pickle
-import numpy as np
 from typing import List
+
+import numpy as np
+import face_recognition
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Form
 from PIL import Image, ExifTags
-import face_recognition
 from sqlalchemy import create_engine, Column, String, BLOB
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 
 app = FastAPI(title="Face Verification Service With DB")
-THRESHOLD = 0.38
+THRESHOLD: float = 0.38  # face distance threshold
 
-# ------------------------------------------------------------
 # DATABASE SETUP
-# ------------------------------------------------------------
 DATABASE_URL = "mysql+mysqlconnector://wadmin:VWVBP04-HJFq@116.193.191.198:3306/kehadiran"
 Base = declarative_base()
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine)
 
+
 class User(Base):
     __tablename__ = "users"
     nip = Column(String(50), primary_key=True, nullable=False)
-    encoding = Column(BLOB, nullable=False)
+    encoding = Column(BLOB, nullable=False)  # pickled list[np.ndarray]
+
 
 Base.metadata.create_all(bind=engine)
+
 
 def get_db():
     db = SessionLocal()
@@ -48,10 +51,9 @@ def get_db():
     finally:
         db.close()
 
-# ------------------------------------------------------------
-# UTILITIES
-# ------------------------------------------------------------
+
 def get_image(bytes_data: bytes) -> Image.Image:
+    """Buka gambar, putar berdasarkan EXIF, dan resize jika perlu."""
     image = Image.open(io.BytesIO(bytes_data))
     try:
         for orientation in ExifTags.TAGS.keys():
@@ -70,19 +72,19 @@ def get_image(bytes_data: bytes) -> Image.Image:
         image.thumbnail((1024, 1024))
     return image
 
+
 def get_encodings(image: Image.Image) -> List[np.ndarray]:
     rgb = np.array(image.convert("RGB"))
     return face_recognition.face_encodings(rgb)
 
-# ------------------------------------------------------------
-# ENDPOINT: Verifikasi wajah dari DB
-# ------------------------------------------------------------
-@app.post("/absen/")
+
+@app.post("/verify/")
 async def verify_face(
     nip: str = Form(...),
     file: UploadFile = File(...),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
+    # 1. Baca gambar & ambil encoding wajah
     data = await file.read()
     image = get_image(data)
     encs = get_encodings(image)
@@ -90,15 +92,12 @@ async def verify_face(
         raise HTTPException(400, "Tidak ada wajah terdeteksi.")
     target = encs[0]
 
+    # 2. Cek apakah NIP sudah terdaftar
     user = db.query(User).filter_by(nip=nip).first()
 
-    if not user:
-        # NIP belum terdaftar → daftarkan user baru
-        new_user = User(
-            nip=nip,
-            encoding=pickle.dumps([target])
-        )
-        db.add(new_user)
+    if user is None:
+        # → Simpan user baru jika belum ada
+        db.add(User(nip=nip, encoding=pickle.dumps([target])))
         db.commit()
         return {
             "result": "new user registered and attendance recorded",
@@ -106,11 +105,11 @@ async def verify_face(
             "nip": nip
         }
 
-    # Jika NIP sudah ada, cocokkan wajahnya
+    # 3. Bandingkan wajah jika NIP sudah terdaftar
     known_list = pickle.loads(user.encoding)
     known_enc = known_list[0] if isinstance(known_list, list) else known_list
-    dist = face_recognition.face_distance([known_enc], target)[0]
-    matched = dist < THRESHOLD
+    dist = float(face_recognition.face_distance([known_enc], target)[0])
+    matched = bool(dist < THRESHOLD)
 
     return {
         "result": "matched" if matched else "not matched",
@@ -119,6 +118,7 @@ async def verify_face(
         "threshold": THRESHOLD,
         "nip": nip
     }
+
 
 @app.get("/")
 def root():
