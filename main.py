@@ -220,15 +220,14 @@ async def register_scan(
 #         "access_token": new_token,
 #         "token_type": "bearer"
 #     }
-
 @app.post("/absen/")
 async def absen(
     file: UploadFile = File(...),
     aut: str = Form(...),
+    email: str = Form(...),  # cek user berdasarkan email
     latitude: str = Form(None),
     longitude: str = Form(None),
     lokasi: str = Form(None),
-    nama: str = Form(...),
     db: Session = Depends(get_db)
 ):
     try:
@@ -236,25 +235,31 @@ async def absen(
         today = now.date()
         jenis = aut.strip().lower()
 
-        # CEK: sudah absen (masuk/keluar) di hari ini?
+        # Cari user berdasarkan email
+        user = db.query(User).filter_by(email=email).first()
+        if not user:
+            raise HTTPException(404, f"Email '{email}' tidak ditemukan.")
+
+        # CEK: sudah absen (masuk/keluar) hari ini?
         existing = db.query(Absen).filter(
             and_(
                 Absen.id == user.id,
                 Absen.date == today,
-                Absen.aut.ilike(jenis)  # case-insensitive
+                Absen.aut.ilike(jenis)
             )
         ).first()
-
         if existing:
-            raise HTTPException(409, f"Anda Sudah absen {aut} hari ini!")
+            raise HTTPException(409, f"Anda sudah absen {aut} hari ini!")
 
-        # Proses absensi seperti biasa...
+        # Proses gambar
         data = await file.read()
         image = get_image(data)
         encs = get_encodings(image)
         if not encs:
             raise HTTPException(400, "Tidak ada wajah terdeteksi.")
         target = encs[0]
+
+        # Bandingkan wajah
         known = pickle.loads(user.encoding)
         if isinstance(known, list):
             known_encs = [np.array(e) for e in known]
@@ -266,6 +271,7 @@ async def absen(
         if not verified:
             raise HTTPException(403, "Wajah tidak cocok.")
 
+        # Simpan absen
         absen_entry = Absen(
             id=user.id,
             datetime=now.strftime("%Y-%m-%d %H:%M:%S"),
@@ -280,6 +286,7 @@ async def absen(
         )
         db.add(absen_entry)
         db.commit()
+
         return {
             "status": "success",
             "message": f"Absen {aut} berhasil!",
@@ -287,6 +294,7 @@ async def absen(
             "nama": user.nama,
             "waktu": now.strftime("%Y-%m-%d %H:%M:%S"),
         }
+
     except HTTPException as he:
         print("ABSEN ERROR:", str(he.detail))
         raise he
@@ -294,6 +302,7 @@ async def absen(
         db.rollback()
         print("ABSEN ERROR:", str(e))
         raise HTTPException(500, f"Absen error: {e}")
+
     
 @app.post("/verify/")
 async def verify_face(
