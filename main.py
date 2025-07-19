@@ -78,7 +78,7 @@ def get_encodings(image: Image.Image) -> List[np.ndarray]:
     return face_recognition.face_encodings(rgb)
 
 
-@app.post("/verify/")
+@app.post("/absen/")
 async def verify_face(
     nip: str = Form(...),
     file: UploadFile = File(...),
