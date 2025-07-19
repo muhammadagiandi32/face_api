@@ -126,7 +126,7 @@ async def verify_face(
                 "message": "Wajah tidak cocok dengan data yang terdaftar.",
                 "data": {
                     "nip": nip,
-                    "matched": matched,
+                    "matched": False,
                     "distance": dist,
                     "threshold": THRESHOLD,
                     "result": "not matched",
