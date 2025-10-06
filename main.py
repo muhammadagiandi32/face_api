@@ -4,28 +4,42 @@ import base64
 import pickle
 import numpy as np
 from PIL import Image, ExifTags
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends
-from sqlalchemy import create_engine, Column, String, Text, BLOB, Integer, Date
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Body
+from sqlalchemy import create_engine, Column, String, Text, BLOB, Integer, Date, and_
+from sqlalchemy.orm import sessionmaker, Session, declarative_base
+from sqlalchemy.dialects.mysql import LONGTEXT
 import face_recognition
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import bcrypt
-from fastapi import Body
-from sqlalchemy import and_
-from sqlalchemy.dialects.mysql import LONGTEXT
 
+# =========================
+# KONFIG DATABASE
+# =========================
+# NOTE: Untuk memastikan server nyala dulu, kamu bisa DEBUG pakai SQLite:
+# DATABASE_URL = "sqlite:///face.db"
+# Setelah OK, ganti ke MySQL kamu:
 DATABASE_URL = "mysql+mysqlconnector://wadmin:VWVBP04-HJFq@116.193.191.198:3306/kehadiran"
 Base = declarative_base()
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(bind=engine)
+engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,     # cegah koneksi stale
+    pool_recycle=1800,      # recycle tiap 30 menit
+    future=True,
+)
+SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
 
+# =========================
+# AUTH CONFIG
+# =========================
 SECRET_KEY = "YOUR_SECRET_KEY_GANTI_SENDIRI"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 120
 
+# =========================
+# MODEL
+# =========================
 class User(Base):
     __tablename__ = "users"
     id = Column(String(6), primary_key=True, nullable=False)
@@ -49,10 +63,23 @@ class Absen(Base):
     lokasi = Column(LONGTEXT)
     encoding = Column(BLOB)
 
-Base.metadata.create_all(bind=engine)
+app = FastAPI(title="Face Verification Service")
 
-app = FastAPI()
+# PENTING: create_all DIPINDAH KE STARTUP supaya kalau DB gagal, traceback terlihat
+@app.on_event("startup")
+def on_startup():
+    try:
+        Base.metadata.create_all(bind=engine)  # <<< WAJIB
+        print("[STARTUP] DB ready:", engine.url)
+    except Exception:
+        import traceback
+        print("[STARTUP] DB init failed:")
+        traceback.print_exc()
+        raise
+
+
 THRESHOLD = 0.38
+bearer_scheme = HTTPBearer()
 
 def get_db():
     db = SessionLocal()
@@ -61,6 +88,9 @@ def get_db():
     finally:
         db.close()
 
+# =========================
+# IMAGE / FACE UTILS
+# =========================
 def get_image(bytes_data: bytes) -> Image.Image:
     image = Image.open(io.BytesIO(bytes_data))
     try:
@@ -84,23 +114,26 @@ def get_encodings(image: Image.Image) -> list:
     rgb = np.array(image.convert("RGB"))
     return face_recognition.face_encodings(rgb)
 
-def create_access_token(data: dict, expires_delta: timedelta = None):
+# =========================
+# AUTH HELPERS
+# =========================
+def create_access_token(data: dict, expires_delta: timedelta | None = None):
     to_encode = data.copy()
     expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-def verify_password(plain, hashed):
+def verify_password(plain: str, hashed: str) -> bool:
     try:
         return bcrypt.checkpw(plain.encode(), hashed.encode())
     except Exception:
         return False
 
-
-bearer_scheme = HTTPBearer()
-
-def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme), db: Session = Depends(get_db)):
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    db: Session = Depends(get_db)
+):
     try:
         payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
         email = payload.get("email")
@@ -113,21 +146,25 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(bearer_
     except JWTError:
         raise HTTPException(401, "Token tidak valid!")
 
+# =========================
+# ENDPOINTS
+# =========================
+@app.get("/")
+def root():
+    return {"ok": True, "service": "face-verification", "db": str(engine.url).split('@')[0] + "@***"}
+
 @app.post("/login/")
 async def login(email: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)):
     user = db.query(User).filter_by(email=email).first()
     if not user or not verify_password(password, user.password):
         raise HTTPException(401, "Email atau password salah!")
-    token = create_access_token({"email": user.email, "name":user.nama})
+    token = create_access_token({"email": user.email, "name": user.nama})
     return {
         "access_token": token,
         "token_type": "bearer",
-        "user": {
-            "id": user.id,
-            "nama": user.nama,
-            "email": user.email
-        }
+        "user": {"id": user.id, "nama": user.nama, "email": user.email},
     }
+
 @app.post("/register-scan/")
 async def register_scan(
     file: UploadFile = File(...),
@@ -137,76 +174,48 @@ async def register_scan(
     db: Session = Depends(get_db)
 ):
     try:
-        print(f"[DEBUG] Mulai register untuk: {nama} | {email}")
-        # 1. Cek email
         if db.query(User).filter_by(email=email).first():
-            print(f"[DEBUG] Email sudah terdaftar: {email}")
             raise HTTPException(409, "Email sudah terdaftar!")
-        # 2. Cek nama
         if db.query(User).filter_by(nama=nama).first():
-            print(f"[DEBUG] Nama sudah terdaftar: {nama}")
             raise HTTPException(409, "Nama sudah terdaftar!")
-        
-        # 3. Baca dan proses file
+
         data = await file.read()
-        print(f"[DEBUG] File foto diterima, ukuran: {len(data)} bytes")
         image = get_image(data)
         encs = get_encodings(image)
         if not encs:
-            print(f"[DEBUG] Tidak ada wajah terdeteksi dalam gambar")
             raise HTTPException(400, "Tidak ada wajah terdeteksi.")
         face_encoding = encs[0]
-        print(f"[DEBUG] Encoding wajah berhasil didapatkan")
 
-        # 4. Cek kemiripan dengan user lain
-        all_users = db.query(User).all()
-        for user in all_users:
-            if user.encoding:
-                user_enc = pickle.loads(user.encoding)
-                if isinstance(user_enc, list):
-                    user_enc = user_enc[0]
-                distance = face_recognition.face_distance([np.array(user_enc)], face_encoding)[0]
-                print(f"[DEBUG] Cek kemiripan dengan {user.nama}: distance={distance}")
+        # Tolak jika wajah mirip dengan user lain (duplikasi)
+        for u in db.query(User).all():
+            if u.encoding:
+                u_enc = pickle.loads(u.encoding)
+                if isinstance(u_enc, list):
+                    u_enc = u_enc[0]
+                distance = face_recognition.face_distance([np.array(u_enc)], face_encoding)[0]
                 if distance < THRESHOLD:
-                    print(f"[DEBUG] Wajah mirip dengan user lain: {user.nama} | Jarak: {distance}")
-                    raise HTTPException(409, f"Wajah sudah terdaftar atas nama {user.nama}!")
+                    raise HTTPException(409, f"Wajah sudah terdaftar atas nama {u.nama}!")
 
-        # 5. Hash password
-        hashed_pw = bcrypt.hashpw(password.encode(), bcrypt.gensalt())
-        print("HASHED BYTES:", hashed_pw)
-        hashed_pw_str = hashed_pw.decode()
-        print("HASHED DECODED:", hashed_pw_str)
-
-        # 6. Simpan ke database
+        hashed_pw = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
         foto_base64 = base64.b64encode(data).decode('utf-8')
         user_id = str(uuid.uuid4())[:6]
-        print(f"[DEBUG] User ID: {user_id}")
 
-                
         user = User(
             id=user_id,
             nama=nama,
             email=email,
-            password=hashed_pw_str, 
+            password=hashed_pw,
             foto_registrasi=foto_base64,
-            encoding=pickle.dumps([face_encoding])
+            encoding=pickle.dumps([face_encoding]),
         )
         db.add(user)
         db.commit()
-        print(f"[DEBUG] User berhasil didaftarkan dan disimpan ke database.")
 
-        return {
-            "status": "completed",
-            "progress": 100,
-            "instruction": "Registrasi selesai!",
-            "user_id": user_id,
-        }
-    except HTTPException as he:
-        print(f"[DEBUG][HTTPException] {he.detail}")
-        raise he
+        return {"status": "completed", "progress": 100, "instruction": "Registrasi selesai!", "user_id": user_id}
+    except HTTPException:
+        raise
     except Exception as e:
         db.rollback()
-        print("[DEBUG][DB ERROR]:", str(e))
         raise HTTPException(500, f"DB Error: {e}")
 
 @app.post("/refresh/")
@@ -214,12 +223,8 @@ async def refresh_token(email: str = Body(...), db: Session = Depends(get_db)):
     user = db.query(User).filter_by(email=email).first()
     if not user:
         raise HTTPException(404, "User tidak ditemukan!")
-    # Buat token baru, payload bebas (email, nama, dsb)
     new_token = create_access_token({"email": user.email, "name": user.nama})
-    return {
-        "access_token": new_token,
-        "token_type": "bearer"
-    }
+    return {"access_token": new_token, "token_type": "bearer"}
 
 @app.post("/absen/")
 async def absen(
@@ -236,30 +241,21 @@ async def absen(
         today = now.date()
         jenis = aut.strip().lower()
 
-        # CEK: sudah absen (masuk/keluar) di hari ini?
         existing = db.query(Absen).filter(
-            and_(
-                Absen.id == user.id,
-                Absen.date == today,
-                Absen.aut.ilike(jenis)  # case-insensitive
-            )
+            and_(Absen.id == user.id, Absen.date == today, Absen.aut.ilike(jenis))
         ).first()
-
         if existing:
             raise HTTPException(409, f"Anda Sudah absen {aut} hari ini!")
 
-        # Proses absensi seperti biasa...
         data = await file.read()
         image = get_image(data)
         encs = get_encodings(image)
         if not encs:
             raise HTTPException(400, "Tidak ada wajah terdeteksi.")
         target = encs[0]
+
         known = pickle.loads(user.encoding)
-        if isinstance(known, list):
-            known_encs = [np.array(e) for e in known]
-        else:
-            known_encs = [np.array(known)]
+        known_encs = [np.array(e) for e in (known if isinstance(known, list) else [known])]
         distances = face_recognition.face_distance(known_encs, target)
         min_distance = float(np.min(distances))
         verified = bool(min_distance < THRESHOLD)
@@ -276,7 +272,7 @@ async def absen(
             latitude=latitude,
             longitude=longitude,
             lokasi=lokasi,
-            encoding=pickle.dumps([target])
+            encoding=pickle.dumps([target]),
         )
         db.add(absen_entry)
         db.commit()
@@ -287,96 +283,63 @@ async def absen(
             "nama": user.nama,
             "waktu": now.strftime("%Y-%m-%d %H:%M:%S"),
         }
-    except HTTPException as he:
-        print("ABSEN ERROR:", str(he.detail))
-        raise he
+    except HTTPException:
+        raise
     except Exception as e:
         db.rollback()
-        print("ABSEN ERROR:", str(e))
         raise HTTPException(500, f"Absen error: {e}")
-    
+
 @app.post("/verify/")
 async def verify_face(
     file: UploadFile = File(...),
     nama: str = Form(...),
     db: Session = Depends(get_db)
 ):
-    try:
-        user = db.query(User).filter_by(nama=nama).first()
-        if not user:
-            raise HTTPException(404, f"Nama '{nama}' tidak ditemukan di database.")
-        data = await file.read()
-        image = get_image(data)
-        encs = get_encodings(image)
-        if not encs:
-            image.save("debug_no_face_verify.jpg")
-            raise HTTPException(400, "Tidak ada wajah terdeteksi.")
-        target = encs[0]
-        known = pickle.loads(user.encoding)
-        distances = face_recognition.face_distance([np.array(e) for e in known], target)
-        min_distance = float(np.min(distances))
-        verified = bool(min_distance < THRESHOLD)
-        return {
-            "verified": verified,
-            "nama": nama,
-            "distance": min_distance,
-            "threshold": THRESHOLD,
-        }
-    finally:
-        db.close()
-from fastapi import APIRouter, Depends
-from sqlalchemy.orm import Session
-from datetime import datetime
+    user = db.query(User).filter_by(nama=nama).first()
+    if not user:
+        raise HTTPException(404, f"Nama '{nama}' tidak ditemukan di database.")
+    data = await file.read()
+    image = get_image(data)
+    encs = get_encodings(image)
+    if not encs:
+        image.save("debug_no_face_verify.jpg")
+        raise HTTPException(400, "Tidak ada wajah terdeteksi.")
+    target = encs[0]
+    known = pickle.loads(user.encoding)
+    distances = face_recognition.face_distance([np.array(e) for e in (known if isinstance(known, list) else [known])], target)
+    min_distance = float(np.min(distances))
+    verified = bool(min_distance < THRESHOLD)
+    return {"verified": verified, "nama": nama, "distance": min_distance, "threshold": THRESHOLD}
 
 @app.get("/absen/history")
 def get_absen_history(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    import time
-    t0 = time.time()
-    try:
-        rows = (
-            db.query(Absen)
-            .filter(Absen.id == user.id)
-            .order_by(Absen.date.desc(), Absen.time.desc())
-            .all()
-        )
+    rows = (
+        db.query(Absen)
+        .filter(Absen.id == user.id)
+        .order_by(Absen.date.desc(), Absen.time.desc())
+        .all()
+    )
 
-        # Group by tanggal
-        history = {}
-        for ab in rows:
-            date_str = ab.date.strftime("%A, %d %B %Y")
-            jam = ab.time
-            jenis = ab.aut.lower()
-            lokasi = ab.lokasi
+    history = {}
+    for ab in rows:
+        date_str = ab.date.strftime("%A, %d %B %Y")
+        jam = ab.time
+        jenis = ab.aut.lower()
+        lokasi = ab.lokasi
 
-            if date_str not in history:
-                history[date_str] = {"masuk": None, "keluar": None, "lokasi": lokasi}
+        if date_str not in history:
+            history[date_str] = {"masuk": None, "keluar": None, "lokasi": lokasi}
 
-            if "masuk" in jenis and not history[date_str]["masuk"]:
-                history[date_str]["masuk"] = jam
-                history[date_str]["lokasi"] = lokasi
-            if "keluar" in jenis:
-                history[date_str]["keluar"] = jam
+        if "masuk" in jenis and not history[date_str]["masuk"]:
+            history[date_str]["masuk"] = jam
+            history[date_str]["lokasi"] = lokasi
+        if "keluar" in jenis:
+            history[date_str]["keluar"] = jam
 
-        result = []
-        for date_str, val in history.items():
-            result.append({
-                "tanggal": date_str,
-                "masuk": val["masuk"],
-                "keluar": val["keluar"],
-                "lokasi": val["lokasi"],
-            })
-
-        result = sorted(result, key=lambda x: datetime.strptime(x["tanggal"], "%A, %d %B %Y"), reverse=True)
-
-        t1 = time.time()
-        print(f"[DEBUG] History endpoint selesai dalam {t1-t0:.2f} detik")
-        return {"history": result}
-
-    except Exception as e:
-        import traceback
-        tb = traceback.format_exc()
-        print("[ERROR] /absen/history:", str(e))
-        print(tb)
-        # Kamu bisa return pesan error ke frontend juga
-        raise HTTPException(status_code=500, detail=f"Internal Server Error: {e}")
-
+    result = [
+        {"tanggal": d, "masuk": v["masuk"], "keluar": v["keluar"], "lokasi": v["lokasi"]}
+        for d, v in history.items()
+    ]
+    # sort desc
+    result.sort(key=lambda x: datetime.strptime(x["tanggal"], "%A, %d %B %Y"), reverse=True)
+    return {"history": result}

@@ -1,8 +1,9 @@
 fastapi
 uvicorn
 sqlalchemy
+pymysql
 face_recognition
+Pillow
 python-jose
 bcrypt
-pillow
 numpy
