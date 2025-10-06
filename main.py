@@ -1,41 +1,60 @@
+from dotenv import load_dotenv
+load_dotenv()
+
+
+import os
 import io
 import uuid
 import base64
 import pickle
+import logging
+from datetime import datetime, timedelta
+from contextlib import asynccontextmanager
+
 import numpy as np
 from PIL import Image, ExifTags
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Body
-from sqlalchemy import create_engine, Column, String, Text, BLOB, Integer, Date, and_
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from sqlalchemy import create_engine, Column, String, Text, BLOB, Integer, Date, and_, text
 from sqlalchemy.orm import sessionmaker, Session, declarative_base
 from sqlalchemy.dialects.mysql import LONGTEXT
-import face_recognition
-from datetime import datetime, timedelta
 from jose import JWTError, jwt
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import bcrypt
+import uvicorn
 
 # =========================
-# KONFIG DATABASE
+# LOGGING & KONFIG ENV
 # =========================
-# NOTE: Untuk memastikan server nyala dulu, kamu bisa DEBUG pakai SQLite:
-# DATABASE_URL = "sqlite:///face.db"
-# Setelah OK, ganti ke MySQL kamu:
-DATABASE_URL = "mysql+mysqlconnector://wadmin:VWVBP04-HJFq@116.193.191.198:3306/kehadiran"
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
+PORT = int(os.getenv("PORT", 8000))
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "mysql+mysqlconnector://wadmin:VWVBP04-HJFq@116.193.191.198:3306/kehadiran"
+)
+SECRET_KEY = os.getenv("SECRET_KEY", "YOUR_SECRET_KEY_GANTI_SENDIRI")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 120))
+THRESHOLD = float(os.getenv("FACE_THRESHOLD", 0.38))
+
+
+# =========================
+# DATABASE SETUP
+# =========================
 Base = declarative_base()
 engine = create_engine(
     DATABASE_URL,
-    pool_pre_ping=True,     # cegah koneksi stale
-    pool_recycle=1800,      # recycle tiap 30 menit
+    pool_pre_ping=True,
+    pool_recycle=1800,
     future=True,
 )
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
 
-# =========================
-# AUTH CONFIG
-# =========================
-SECRET_KEY = "YOUR_SECRET_KEY_GANTI_SENDIRI"
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 120
 
 # =========================
 # MODEL
@@ -48,6 +67,7 @@ class User(Base):
     password = Column(String(255), nullable=False)
     foto_registrasi = Column(LONGTEXT)
     encoding = Column(BLOB)
+
 
 class Absen(Base):
     __tablename__ = "absen"
@@ -63,24 +83,29 @@ class Absen(Base):
     lokasi = Column(LONGTEXT)
     encoding = Column(BLOB)
 
-app = FastAPI(title="Face Verification Service")
 
-# PENTING: create_all DIPINDAH KE STARTUP supaya kalau DB gagal, traceback terlihat
-@app.on_event("startup")
-def on_startup():
+# =========================
+# FASTAPI Lifespan Event
+# =========================
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     try:
-        Base.metadata.create_all(bind=engine)  # <<< WAJIB
-        print("[STARTUP] DB ready:", engine.url)
+        Base.metadata.create_all(bind=engine)
+        logger.info(f"[STARTUP] Database siap: {engine.url}")
     except Exception:
-        import traceback
-        print("[STARTUP] DB init failed:")
-        traceback.print_exc()
+        logger.exception("[STARTUP] Gagal inisialisasi database!")
         raise
+    yield
+    logger.info("[SHUTDOWN] Aplikasi ditutup.")
 
 
-THRESHOLD = 0.38
+app = FastAPI(title="Face Verification Service", lifespan=lifespan)
 bearer_scheme = HTTPBearer()
 
+
+# =========================
+# DEPENDENCY
+# =========================
 def get_db():
     db = SessionLocal()
     try:
@@ -88,47 +113,55 @@ def get_db():
     finally:
         db.close()
 
+
 # =========================
-# IMAGE / FACE UTILS
+# FACE & IMAGE UTILITIES
 # =========================
-def get_image(bytes_data: bytes) -> Image.Image:
+def get_image(bytes_data: bytes):
     image = Image.open(io.BytesIO(bytes_data))
     try:
-        for orientation in ExifTags.TAGS.keys():
-            if ExifTags.TAGS[orientation] == 'Orientation':
+        for key, val in ExifTags.TAGS.items():
+            if val == "Orientation":
+                orientation_key = key
                 break
-        exif = dict(image._getexif().items())
-        if exif.get(orientation) == 3:
-            image = image.rotate(180, expand=True)
-        elif exif.get(orientation) == 6:
-            image = image.rotate(270, expand=True)
-        elif exif.get(orientation) == 8:
-            image = image.rotate(90, expand=True)
+        exif = image._getexif()
+        if exif and orientation_key in exif:
+            if exif[orientation_key] == 3:
+                image = image.rotate(180, expand=True)
+            elif exif[orientation_key] == 6:
+                image = image.rotate(270, expand=True)
+            elif exif[orientation_key] == 8:
+                image = image.rotate(90, expand=True)
     except Exception:
         pass
+
     if max(image.size) > 1024:
         image.thumbnail((1024, 1024))
     return image
 
-def get_encodings(image: Image.Image) -> list:
+
+def get_encodings(image):
+    import face_recognition
     rgb = np.array(image.convert("RGB"))
     return face_recognition.face_encodings(rgb)
 
+
 # =========================
-# AUTH HELPERS
+# AUTH HELPER FUNCTIONS
 # =========================
 def create_access_token(data: dict, expires_delta: timedelta | None = None):
     to_encode = data.copy()
     expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
     to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
 
 def verify_password(plain: str, hashed: str) -> bool:
     try:
         return bcrypt.checkpw(plain.encode(), hashed.encode())
     except Exception:
         return False
+
 
 def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
@@ -137,7 +170,7 @@ def get_current_user(
     try:
         payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
         email = payload.get("email")
-        if email is None:
+        if not email:
             raise HTTPException(401, "Token tidak valid!")
         user = db.query(User).filter_by(email=email).first()
         if not user:
@@ -146,12 +179,15 @@ def get_current_user(
     except JWTError:
         raise HTTPException(401, "Token tidak valid!")
 
+
 # =========================
 # ENDPOINTS
 # =========================
 @app.get("/")
 def root():
-    return {"ok": True, "service": "face-verification", "db": str(engine.url).split('@')[0] + "@***"}
+    masked_url = str(engine.url).split("@")[0] + "@***"
+    return {"ok": True, "service": "face-verification", "db": masked_url}
+
 
 @app.post("/login/")
 async def login(email: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)):
@@ -165,6 +201,7 @@ async def login(email: str = Form(...), password: str = Form(...), db: Session =
         "user": {"id": user.id, "nama": user.nama, "email": user.email},
     }
 
+
 @app.post("/register-scan/")
 async def register_scan(
     file: UploadFile = File(...),
@@ -173,6 +210,7 @@ async def register_scan(
     password: str = Form(...),
     db: Session = Depends(get_db)
 ):
+    import face_recognition
     try:
         if db.query(User).filter_by(email=email).first():
             raise HTTPException(409, "Email sudah terdaftar!")
@@ -186,7 +224,7 @@ async def register_scan(
             raise HTTPException(400, "Tidak ada wajah terdeteksi.")
         face_encoding = encs[0]
 
-        # Tolak jika wajah mirip dengan user lain (duplikasi)
+        # Cegah duplikasi wajah
         for u in db.query(User).all():
             if u.encoding:
                 u_enc = pickle.loads(u.encoding)
@@ -216,7 +254,9 @@ async def register_scan(
         raise
     except Exception as e:
         db.rollback()
+        logger.exception("Register error")
         raise HTTPException(500, f"DB Error: {e}")
+
 
 @app.post("/refresh/")
 async def refresh_token(email: str = Body(...), db: Session = Depends(get_db)):
@@ -225,6 +265,7 @@ async def refresh_token(email: str = Body(...), db: Session = Depends(get_db)):
         raise HTTPException(404, "User tidak ditemukan!")
     new_token = create_access_token({"email": user.email, "name": user.nama})
     return {"access_token": new_token, "token_type": "bearer"}
+
 
 @app.post("/absen/")
 async def absen(
@@ -236,6 +277,7 @@ async def absen(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    import face_recognition
     try:
         now = datetime.now()
         today = now.date()
@@ -245,7 +287,7 @@ async def absen(
             and_(Absen.id == user.id, Absen.date == today, Absen.aut.ilike(jenis))
         ).first()
         if existing:
-            raise HTTPException(409, f"Anda Sudah absen {aut} hari ini!")
+            raise HTTPException(409, f"Anda sudah absen {aut} hari ini!")
 
         data = await file.read()
         image = get_image(data)
@@ -259,6 +301,7 @@ async def absen(
         distances = face_recognition.face_distance(known_encs, target)
         min_distance = float(np.min(distances))
         verified = bool(min_distance < THRESHOLD)
+
         if not verified:
             raise HTTPException(403, "Wajah tidak cocok.")
 
@@ -276,6 +319,7 @@ async def absen(
         )
         db.add(absen_entry)
         db.commit()
+
         return {
             "status": "success",
             "message": f"Absen {aut} berhasil!",
@@ -287,7 +331,9 @@ async def absen(
         raise
     except Exception as e:
         db.rollback()
+        logger.exception("Absen error")
         raise HTTPException(500, f"Absen error: {e}")
+
 
 @app.post("/verify/")
 async def verify_face(
@@ -295,36 +341,35 @@ async def verify_face(
     nama: str = Form(...),
     db: Session = Depends(get_db)
 ):
+    import face_recognition
     user = db.query(User).filter_by(nama=nama).first()
     if not user:
         raise HTTPException(404, f"Nama '{nama}' tidak ditemukan di database.")
+
     data = await file.read()
     image = get_image(data)
     encs = get_encodings(image)
     if not encs:
-        image.save("debug_no_face_verify.jpg")
         raise HTTPException(400, "Tidak ada wajah terdeteksi.")
     target = encs[0]
     known = pickle.loads(user.encoding)
-    distances = face_recognition.face_distance([np.array(e) for e in (known if isinstance(known, list) else [known])], target)
+    distances = face_recognition.face_distance(
+        [np.array(e) for e in (known if isinstance(known, list) else [known])], target
+    )
     min_distance = float(np.min(distances))
     verified = bool(min_distance < THRESHOLD)
     return {"verified": verified, "nama": nama, "distance": min_distance, "threshold": THRESHOLD}
 
+
 @app.get("/absen/history")
 def get_absen_history(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    rows = (
-        db.query(Absen)
-        .filter(Absen.id == user.id)
-        .order_by(Absen.date.desc(), Absen.time.desc())
-        .all()
-    )
+    rows = db.query(Absen).filter(Absen.id == user.id).order_by(Absen.date.desc(), Absen.time.desc()).all()
 
     history = {}
     for ab in rows:
         date_str = ab.date.strftime("%A, %d %B %Y")
-        jam = ab.time
         jenis = ab.aut.lower()
+        jam = ab.time
         lokasi = ab.lokasi
 
         if date_str not in history:
@@ -332,14 +377,25 @@ def get_absen_history(user: User = Depends(get_current_user), db: Session = Depe
 
         if "masuk" in jenis and not history[date_str]["masuk"]:
             history[date_str]["masuk"] = jam
-            history[date_str]["lokasi"] = lokasi
         if "keluar" in jenis:
             history[date_str]["keluar"] = jam
 
-    result = [
-        {"tanggal": d, "masuk": v["masuk"], "keluar": v["keluar"], "lokasi": v["lokasi"]}
-        for d, v in history.items()
-    ]
-    # sort desc
+    result = [{"tanggal": d, **v} for d, v in history.items()]
     result.sort(key=lambda x: datetime.strptime(x["tanggal"], "%A, %d %B %Y"), reverse=True)
     return {"history": result}
+
+
+# =========================
+# MAIN ENTRYPOINT
+# =========================
+if __name__ == "__main__":
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+            logger.info("✅ Koneksi database berhasil.")
+    except Exception as e:
+        logger.error(f"❌ Gagal konek ke database: {e}")
+
+    module_name = os.path.splitext(os.path.basename(__file__))[0]
+    logger.info(f"🚀 Server berjalan di http://127.0.0.1:{PORT}")
+    uvicorn.run(f"{module_name}:app", host="127.0.0.1", port=PORT, reload=True)
